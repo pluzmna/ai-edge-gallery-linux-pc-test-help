@@ -1,1 +1,1 @@
-# ai-edge-gallery-linux-pc-test-help llm not working please
+# ai-edge-gallery-linux-pc-test-help.appimage llm not working please
