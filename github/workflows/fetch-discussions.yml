@@ -1,0 +1,125 @@
+name: Fetch Discussions
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'  # Her 5 dakikada bir güncelle
+  workflow_dispatch:  # Manuel tetikleme
+
+permissions:
+  contents: write
+  discussions: read
+
+jobs:
+  fetch-discussions:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Fetch Discussions via GraphQL
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Fetching discussions..."
+
+          # GraphQL query to fetch discussions with comments
+          QUERY='
+          {
+            repository(owner: "pluzmna", name: "ai-edge-gallery-linux-pc-test-help") {
+              discussions(first: 50, orderBy: {field: UPDATED_AT, direction: DESC}) {
+                nodes {
+                  id
+                  number
+                  title
+                  body
+                  createdAt
+                  updatedAt
+                  answer { id }
+                  category { name slug }
+                  author { login avatarUrl }
+                  userContentEdits { totalCount }
+                  comments(first: 5) {
+                    nodes {
+                      id
+                      body
+                      createdAt
+                      updatedAt
+                      author { login avatarUrl }
+                    }
+                  }
+                  reactions {
+                    totalCount
+                    group { emoji username }
+                  }
+                  labels(first: 10) { nodes { name } }
+                }
+              }
+            }
+          }
+          '
+
+          RESPONSE=$(curl -s -X POST \
+            -H "Authorization: bearer $GITHUB_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"query\": \"$QUERY\"}" \
+            https://api.github.com/graphql)
+
+          echo "$RESPONSE" | python3 -c "
+          import json, sys
+
+          data = json.load(sys.stdin)
+
+          if 'errors' in data:
+              print(f'GraphQL errors: {data[\"errors\"]}', file=sys.stderr)
+              discussions = []
+          else:
+              repo = data.get('data', {}).get('repository', {})
+              discussions_data = repo.get('discussions', {}).get('nodes', [])
+              discussions = []
+              for d in discussions_data:
+                  disc = {
+                      'id': d['id'],
+                      'number': d['number'],
+                      'title': d['title'],
+                      'body': d.get('body', ''),
+                      'created_at': d['createdAt'],
+                      'updated_at': d['updatedAt'],
+                      'answer': d.get('answer') is not None,
+                      'category': {
+                          'name': d['category']['name'],
+                          'slug': d['category']['slug']
+                      },
+                      'user': {
+                          'login': d['author']['login'],
+                          'avatar_url': d['author']['avatarUrl']
+                      },
+                      'comments': len(d.get('comments', {}).get('nodes', [])),
+                      'reactions': {
+                          '+1': sum(1 for g in d.get('reactions', {}).get('group', []) if g.get('emoji') == '👍'),
+                          'total': d.get('reactions', {}).get('totalCount', 0)
+                      },
+                      'labels': [l['name'] for l in d.get('labels', {}).get('nodes', [])],
+                      'comment_list': [
+                          {
+                              'body': c['body'][:200],
+                              'author': c['author']['login'],
+                              'avatar': c['author']['avatarUrl'],
+                              'created_at': c['createdAt']
+                          }
+                          for c in d.get('comments', {}).get('nodes', [])
+                      ]
+                  }
+                  discussions.append(disc)
+
+          print(json.dumps({'discussions': discussions, 'fetched_at': '$(date -u +%Y-%m-%dT%H:%M:%SZ)'}))
+          " > data/discussions.json
+
+          echo "Fetched $(cat data/discussions.json | python3 -c 'import json,sys;print(len(json.load(sys.stdin).get("discussions",[])))') discussions"
+
+      - name: Commit and push
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add data/discussions.json
+          git diff --staged --quiet || git commit -m "Update discussions data [skip ci]"
+          git push
